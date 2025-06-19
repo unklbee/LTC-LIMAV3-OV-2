@@ -7,17 +7,17 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSlider, QToolBar, QFileDialog,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsPolygonItem, QMenu
+    QGraphicsPolygonItem, QGraphicsLineItem, QMenu, QInputDialog
 )
 from PySide6.QtCore import (
-    Qt, Signal, QPointF
+    Qt, Signal, QPointF, QRectF, QTimer, QDateTime
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QPolygonF,
-    QColor, QAction, QKeySequence
+    QColor, QAction, QKeySequence, QMouseEvent
 )
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 import cv2
 
 import structlog
@@ -52,6 +52,10 @@ class InteractiveVideoWidget(QGraphicsView):
         self.roi_item = None
         self.line_items = []
 
+        # Current frame info
+        self.current_frame = None
+        self.frame_size = (640, 480)
+
         # Styling
         self.roi_pen = QPen(QColor(0, 255, 0, 200), 2)
         self.roi_brush = QBrush(QColor(0, 255, 0, 50))
@@ -70,18 +74,20 @@ class InteractiveVideoWidget(QGraphicsView):
 
     def display_frame(self, frame: np.ndarray):
         """Display video frame"""
-        height, width, channel = frame.shape
-        bytes_per_line = 3 * width
+        self.current_frame = frame
+        height, width = frame.shape[:2]
+        self.frame_size = (width, height)
 
-        # Convert to QImage
-        if channel == 3:
+        if len(frame.shape) == 2:
+            # Grayscale
+            bytes_per_line = width
+            q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            # Color
+            bytes_per_line = 3 * width
             # BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            q_image = QImage(frame_rgb.data, width, height,
-                             bytes_per_line, QImage.Format_RGB888)
-        else:
-            q_image = QImage(frame.data, width, height,
-                             bytes_per_line, QImage.Format_RGB888)
+            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
         # Update pixmap
         pixmap = QPixmap.fromImage(q_image)
@@ -96,6 +102,7 @@ class InteractiveVideoWidget(QGraphicsView):
         self.drawing_points = []
         self._clear_temp_items()
         self.setCursor(Qt.CrossCursor)
+        logger.info("Started ROI drawing mode")
 
     def start_line_drawing(self):
         """Start line drawing mode"""
@@ -103,6 +110,7 @@ class InteractiveVideoWidget(QGraphicsView):
         self.drawing_points = []
         self._clear_temp_items()
         self.setCursor(Qt.CrossCursor)
+        logger.info("Started line drawing mode")
 
     def cancel_drawing(self):
         """Cancel current drawing"""
@@ -110,6 +118,7 @@ class InteractiveVideoWidget(QGraphicsView):
         self.drawing_points = []
         self._clear_temp_items()
         self.setCursor(Qt.ArrowCursor)
+        logger.info("Cancelled drawing mode")
 
     def clear_overlays(self):
         """Clear all overlays"""
@@ -124,8 +133,9 @@ class InteractiveVideoWidget(QGraphicsView):
         self.line_items.clear()
 
         self._clear_temp_items()
+        logger.info("Cleared all overlays")
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press"""
         if self.drawing_mode and event.button() == Qt.LeftButton:
             # Convert to scene coordinates
@@ -142,14 +152,14 @@ class InteractiveVideoWidget(QGraphicsView):
 
         super().mousePressEvent(event)
 
-    def mouseDoubleClickEvent(self, event):
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
         """Handle double click to finish ROI"""
         if self.drawing_mode == 'roi' and len(self.drawing_points) >= 3:
             self._finish_roi_drawing()
 
         super().mouseDoubleClickEvent(event)
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event: QMouseEvent):
         """Handle mouse move for preview"""
         if self.drawing_mode and self.drawing_points:
             # Update preview with current mouse position
@@ -177,47 +187,47 @@ class InteractiveVideoWidget(QGraphicsView):
             return
 
         if self.drawing_mode == 'roi':
-            # Draw polygon edges
-            points = self.drawing_points.copy()
+            # Draw polygon preview
+            points = self.drawing_points[:]
             if preview_point:
                 points.append(preview_point)
 
-            for i in range(len(points)):
-                start = points[i]
-                end = points[(i + 1) % len(points)]
+            if len(points) >= 2:
+                # Draw lines
+                for i in range(len(points) - 1):
+                    line = self.scene.addLine(
+                        points[i].x(), points[i].y(),
+                        points[i + 1].x(), points[i + 1].y(),
+                        self.temp_pen
+                    )
+                    self.temp_items.append(line)
 
+                # Close polygon if we have at least 3 points
+                if len(points) >= 3 and preview_point:
+                    line = self.scene.addLine(
+                        points[-1].x(), points[-1].y(),
+                        points[0].x(), points[0].y(),
+                        self.temp_pen
+                    )
+                    self.temp_items.append(line)
+
+        elif self.drawing_mode == 'line' and len(self.drawing_points) == 1:
+            # Draw line preview
+            if preview_point:
                 line = self.scene.addLine(
-                    start.x(), start.y(), end.x(), end.y(),
+                    self.drawing_points[0].x(), self.drawing_points[0].y(),
+                    preview_point.x(), preview_point.y(),
                     self.temp_pen
                 )
                 self.temp_items.append(line)
 
-            # Draw points
-            for point in self.drawing_points:
-                ellipse = self.scene.addEllipse(
-                    point.x() - 3, point.y() - 3, 6, 6,
-                    self.temp_pen, QBrush(Qt.yellow)
-                )
-                self.temp_items.append(ellipse)
-
-        elif self.drawing_mode == 'line':
-            if len(self.drawing_points) == 1:
-                start = self.drawing_points[0]
-                end = preview_point or start
-
-                line = self.scene.addLine(
-                    start.x(), start.y(), end.x(), end.y(),
-                    self.temp_pen
-                )
-                self.temp_items.append(line)
-
-            # Draw points
-            for point in self.drawing_points:
-                ellipse = self.scene.addEllipse(
-                    point.x() - 3, point.y() - 3, 6, 6,
-                    self.temp_pen, QBrush(Qt.yellow)
-                )
-                self.temp_items.append(ellipse)
+        # Draw points
+        for point in self.drawing_points:
+            ellipse = self.scene.addEllipse(
+                point.x() - 3, point.y() - 3, 6, 6,
+                self.temp_pen, QBrush(QColor(255, 255, 0))
+            )
+            self.temp_items.append(ellipse)
 
     def _clear_temp_items(self):
         """Clear temporary drawing items"""
@@ -230,32 +240,24 @@ class InteractiveVideoWidget(QGraphicsView):
         if len(self.drawing_points) < 3:
             return
 
-        # Create polygon
-        polygon = QPolygonF(self.drawing_points)
-
-        # Remove old ROI
+        # Remove old ROI if exists
         if self.roi_item:
             self.scene.removeItem(self.roi_item)
 
-        # Add new ROI
+        # Create polygon
+        polygon = QPolygonF(self.drawing_points)
         self.roi_item = QGraphicsPolygonItem(polygon)
         self.roi_item.setPen(self.roi_pen)
         self.roi_item.setBrush(self.roi_brush)
         self.scene.addItem(self.roi_item)
 
         # Convert to list of tuples
-        points = [(p.x(), p.y()) for p in self.drawing_points]
-
-        # Emit signal
-        self.roi_defined.emit(points)
+        roi_points = [(p.x(), p.y()) for p in self.drawing_points]
+        self.roi_defined.emit(roi_points)
 
         # Reset drawing mode
-        self.drawing_mode = None
-        self.drawing_points = []
-        self._clear_temp_items()
-        self.setCursor(Qt.ArrowCursor)
-
-        logger.info(f"ROI defined with {len(points)} points")
+        self.cancel_drawing()
+        logger.info(f"ROI defined with {len(roi_points)} points")
 
     def _finish_line_drawing(self):
         """Finish line drawing"""
@@ -263,61 +265,25 @@ class InteractiveVideoWidget(QGraphicsView):
             return
 
         # Create line
-        start = self.drawing_points[0]
-        end = self.drawing_points[1]
-
-        line = self.scene.addLine(
-            start.x(), start.y(), end.x(), end.y(),
-            self.line_pen
+        line = QGraphicsLineItem(
+            self.drawing_points[0].x(), self.drawing_points[0].y(),
+            self.drawing_points[1].x(), self.drawing_points[1].y()
         )
+        line.setPen(self.line_pen)
+        self.scene.addItem(line)
         self.line_items.append(line)
 
-        # Add arrow to show direction
-        self._add_direction_arrow(start, end)
-
-        # Create line data
+        # Emit line data
         line_data = {
-            'start': (start.x(), start.y()),
-            'end': (end.x(), end.y()),
-            'id': f"line_{len(self.line_items)}"
+            'id': f"line_{len(self.line_items)}",
+            'start': (self.drawing_points[0].x(), self.drawing_points[0].y()),
+            'end': (self.drawing_points[1].x(), self.drawing_points[1].y())
         }
-
-        # Emit signal
         self.line_defined.emit(line_data)
 
         # Reset drawing mode
-        self.drawing_mode = None
-        self.drawing_points = []
-        self._clear_temp_items()
-        self.setCursor(Qt.ArrowCursor)
-
-        logger.info("Counting line defined")
-
-    def _add_direction_arrow(self, start: QPointF, end: QPointF):
-        """Add direction arrow to line"""
-        # Calculate arrow position and angle
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        angle = np.arctan2(dy, dx)
-
-        # Arrow at midpoint
-        mid_x = (start.x() + end.x()) / 2
-        mid_y = (start.y() + end.y()) / 2
-
-        # Arrow points
-        arrow_len = 15
-        arrow_angle = 0.5  # radians
-
-        x1 = mid_x - arrow_len * np.cos(angle - arrow_angle)
-        y1 = mid_y - arrow_len * np.sin(angle - arrow_angle)
-        x2 = mid_x - arrow_len * np.cos(angle + arrow_angle)
-        y2 = mid_y - arrow_len * np.sin(angle + arrow_angle)
-
-        # Draw arrow
-        arrow1 = self.scene.addLine(mid_x, mid_y, x1, y1, self.line_pen)
-        arrow2 = self.scene.addLine(mid_x, mid_y, x2, y2, self.line_pen)
-
-        self.line_items.extend([arrow1, arrow2])
+        self.cancel_drawing()
+        logger.info(f"Line defined: {line_data['id']}")
 
     def _show_context_menu(self, pos):
         """Show context menu"""
@@ -335,6 +301,11 @@ class InteractiveVideoWidget(QGraphicsView):
                 clear_lines_action = menu.addAction("Clear Lines")
                 clear_lines_action.triggered.connect(self._clear_lines)
 
+            menu.addSeparator()
+
+            snapshot_action = menu.addAction("Take Snapshot")
+            snapshot_action.triggered.connect(self._take_snapshot)
+
         menu.exec(self.mapToGlobal(pos))
 
     def _clear_roi(self):
@@ -342,12 +313,28 @@ class InteractiveVideoWidget(QGraphicsView):
         if self.roi_item:
             self.scene.removeItem(self.roi_item)
             self.roi_item = None
+            logger.info("ROI cleared")
 
     def _clear_lines(self):
         """Clear all lines"""
         for item in self.line_items:
             self.scene.removeItem(item)
         self.line_items.clear()
+        logger.info("All lines cleared")
+
+    def _take_snapshot(self):
+        """Take snapshot of current frame"""
+        if self.current_frame is not None:
+            timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
+            filename = f"snapshot_{timestamp}.png"
+            cv2.imwrite(filename, self.current_frame)
+            logger.info(f"Snapshot saved: {filename}")
+
+    def resizeEvent(self, event):
+        """Handle resize to maintain aspect ratio"""
+        super().resizeEvent(event)
+        if self.video_item.pixmap():
+            self.fitInView(self.video_item, Qt.KeepAspectRatio)
 
 
 class VideoControlBar(QWidget):
@@ -376,6 +363,7 @@ class VideoControlBar(QWidget):
         self.play_btn = QPushButton("▶")
         self.play_btn.setObjectName("playButton")
         self.play_btn.setFixedSize(40, 40)
+        self.play_btn.setCheckable(True)
         self.play_btn.clicked.connect(self._toggle_play)
 
         # Speed control
@@ -397,6 +385,7 @@ class VideoControlBar(QWidget):
         # Record button
         self.record_btn = QPushButton("⚫")
         self.record_btn.setObjectName("recordButton")
+        self.record_btn.setCheckable(True)
         self.record_btn.setToolTip("Record Video")
         self.record_btn.clicked.connect(self._toggle_record)
 
@@ -477,7 +466,6 @@ class VideoControlBar(QWidget):
         """Toggle recording"""
         self.is_recording = not self.is_recording
         self.record_btn.setText("⏹" if self.is_recording else "⚫")
-        self.record_btn.setChecked(self.is_recording)
         self.record_toggled.emit(self.is_recording)
 
     def _on_speed_changed(self, value):
@@ -519,14 +507,16 @@ class VideoView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Toolbar
-        self.toolbar = self._create_toolbar()
-        layout.addWidget(self.toolbar)
-
-        # Video display
+        # Video display (create first)
         self.video_widget = InteractiveVideoWidget()
         self.video_widget.roi_defined.connect(self.roi_defined)
         self.video_widget.line_defined.connect(self.line_defined)
+
+        # Toolbar (create after video_widget)
+        self.toolbar = self._create_toolbar()
+        layout.addWidget(self.toolbar)
+
+        # Add video widget
         layout.addWidget(self.video_widget, 1)
 
         # Control bar
@@ -584,6 +574,7 @@ class VideoView(QWidget):
         # Start/Stop
         self.start_btn = QPushButton("Start Detection")
         self.start_btn.setObjectName("startButton")
+        self.start_btn.setCheckable(True)
         self.start_btn.clicked.connect(self._toggle_detection)
         toolbar.addWidget(self.start_btn)
 
@@ -635,8 +626,19 @@ class VideoView(QWidget):
         source_type = self.source_combo.currentText()
 
         if source_type == "Webcam":
-            # TODO: Show camera selection dialog
-            self.source_changed.emit(0)  # Default camera
+            # Show camera selection dialog
+            cameras = self._get_available_cameras()
+            if cameras:
+                camera, ok = QInputDialog.getItem(
+                    self, "Select Camera", "Available cameras:",
+                    [f"Camera {i}" for i in range(len(cameras))],
+                    0, False
+                )
+                if ok:
+                    cam_index = int(camera.split()[-1])
+                    self.source_changed.emit(cam_index)
+            else:
+                self.source_changed.emit(0)  # Default camera
 
         elif source_type == "File":
             file_path, _ = QFileDialog.getOpenFileName(
@@ -650,18 +652,31 @@ class VideoView(QWidget):
                 self.source_changed.emit(file_path)
 
         else:  # RTSP Stream
-            # TODO: Show URL input dialog
-            pass
+            url, ok = QInputDialog.getText(
+                self, "Enter Stream URL",
+                "Stream URL (rtsp://, http://, etc):",
+                text="rtsp://localhost:8554/stream"
+            )
+            if ok and url:
+                self.source_changed.emit(url)
+
+    def _get_available_cameras(self) -> List[int]:
+        """Get list of available cameras"""
+        cameras = []
+        for i in range(10):  # Check first 10 indices
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cameras.append(i)
+                cap.release()
+        return cameras
 
     def _toggle_detection(self):
         """Toggle detection on/off"""
-        if self.start_btn.text() == "Start Detection":
+        if self.start_btn.isChecked():
             self.start_btn.setText("Stop Detection")
-            self.start_btn.setChecked(True)
             self.start_requested.emit()
         else:
             self.start_btn.setText("Start Detection")
-            self.start_btn.setChecked(False)
             self.stop_requested.emit()
 
     def set_vehicle_classes(self, classes: List[str]):
@@ -681,19 +696,34 @@ class VideoView(QWidget):
     def display_frame(self, frame_data):
         """Display processed frame"""
         # Extract frame and annotations
-        frame = frame_data.raw_frame
+        frame = frame_data.raw_frame.copy()  # Make a copy to avoid modifying original
 
         # Draw overlays (detections, tracks, etc.)
-        if frame_data.tracks:
+        if hasattr(frame_data, 'tracks') and frame_data.tracks:
             for track in frame_data.tracks:
                 # Draw bounding box
                 x1, y1, x2, y2 = track.bbox.astype(int)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                # Draw track ID
+                # Draw track ID and class
                 label = f"ID: {track.track_id}"
-                cv2.putText(frame, label, (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                if hasattr(track, 'class_name'):
+                    label += f" ({track.class_name})"
+
+                # Calculate text size for background
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                )
+
+                # Draw background rectangle for text
+                cv2.rectangle(frame,
+                              (x1, y1 - text_height - 4),
+                              (x1 + text_width, y1),
+                              (0, 255, 0), -1)
+
+                # Draw text
+                cv2.putText(frame, label, (x1, y1 - 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         # Update display
         self.video_widget.display_frame(frame)
@@ -701,5 +731,29 @@ class VideoView(QWidget):
         # Update stats
         if hasattr(frame_data, 'metadata'):
             fps = frame_data.metadata.get('fps', 0)
-            detected = len(frame_data.tracks) if frame_data.tracks else 0
+            detected = len(frame_data.tracks) if hasattr(frame_data, 'tracks') and frame_data.tracks else 0
             self.control_bar.update_stats(fps, detected)
+
+    def set_detection_active(self, active: bool):
+        """Update UI to reflect detection state"""
+        self.start_btn.setChecked(active)
+        self.start_btn.setText("Stop Detection" if active else "Start Detection")
+
+    def get_roi_points(self) -> Optional[List[Tuple[float, float]]]:
+        """Get current ROI points if defined"""
+        if self.video_widget.roi_item:
+            polygon = self.video_widget.roi_item.polygon()
+            return [(p.x(), p.y()) for p in polygon]
+        return None
+
+    def get_counting_lines(self) -> List[Dict[str, any]]:
+        """Get all defined counting lines"""
+        lines = []
+        for i, line_item in enumerate(self.video_widget.line_items):
+            line = line_item.line()
+            lines.append({
+                'id': f"line_{i+1}",
+                'start': (line.x1(), line.y1()),
+                'end': (line.x2(), line.y2())
+            })
+        return lines

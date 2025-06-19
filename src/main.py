@@ -58,8 +58,8 @@ class Application(QApplication):
         self.setApplicationVersion("2.0.0")
 
         # High DPI support
-        self.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-        self.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        # self.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        # self.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
         # Style
         self.setStyle("Fusion")

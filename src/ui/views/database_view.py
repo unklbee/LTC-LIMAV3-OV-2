@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QLabel, QDateTimeEdit, QComboBox,
     QHeaderView, QMessageBox, QFileDialog, QProgressDialog,
-    QTabWidget, QTextEdit, QSpinBox
+    QTabWidget, QTextEdit, QSpinBox, QGridLayout, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, Slot, QDateTime, QTimer
 from PySide6.QtGui import QFont

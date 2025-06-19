@@ -5,17 +5,13 @@ Modern main window implementation with fluent design and animations.
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QGraphicsOpacityEffect,
-    QStackedWidget, QSystemTrayIcon, QMenu
+    QPushButton, QLabel, QFrame, QStackedWidget, QSystemTrayIcon, QMenu, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import (
-    Qt, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
-    QRect, QSize, Signal, Slot, QTimer, QPoint
+    Qt, QPropertyAnimation, QEasingCurve, QRect, Signal, Slot, QPoint
 )
 from PySide6.QtGui import (
-    QPainter, QPainterPath, QColor, QLinearGradient,
-    QFont, QFontDatabase, QIcon, QPixmap, QBrush, QPen,
-    QGraphicsDropShadowEffect
+    QColor, QFont, QIcon, QPixmap
 )
 
 import structlog

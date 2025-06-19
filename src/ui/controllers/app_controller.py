@@ -5,7 +5,7 @@ Main application controller that coordinates all components.
 
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import json
 import numpy as np

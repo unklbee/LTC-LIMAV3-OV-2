@@ -3,11 +3,13 @@
 Application configuration model with validation using Pydantic.
 """
 
-from pydantic import BaseSettings, Field, validator, DirectoryPath, FilePath
-from typing import List, Dict, Optional, Union
+from pydantic_settings import BaseSettings
+from pydantic import Field, field_validator, DirectoryPath, FilePath
+from typing import List, Dict, Optional, Union, Any
 from pathlib import Path
 import os
 from enum import Enum
+import json
 
 
 class DeviceType(str, Enum):
@@ -52,27 +54,27 @@ class AppConfig(BaseSettings):
         description="Project root directory"
     )
 
-    model_dir: DirectoryPath = Field(
+    model_dir: Optional[Path] = Field(
         default=None,
         description="Directory containing model files"
     )
 
-    data_dir: DirectoryPath = Field(
+    data_dir: Optional[Path] = Field(
         default=None,
         description="Directory for data storage"
     )
 
-    db_path: Path = Field(
+    db_path: Optional[Path] = Field(
         default=None,
         description="SQLite database file path"
     )
 
-    weights_path: Path = Field(
+    weights_path: Optional[Path] = Field(
         default=None,
         description="Default model weights path"
     )
 
-    log_dir: DirectoryPath = Field(
+    log_dir: Optional[Path] = Field(
         default=None,
         description="Directory for log files"
     )
@@ -273,7 +275,7 @@ class AppConfig(BaseSettings):
     # === Export Settings ===
     export_format: str = Field(
         default="excel",
-        regex="^(excel|csv|json|pdf|html)$",
+        pattern="^(excel|csv|json|pdf|html)$",
         description="Default export format"
     )
 
@@ -298,7 +300,7 @@ class AppConfig(BaseSettings):
         description="Save detection images"
     )
 
-    detections_dir: Optional[DirectoryPath] = Field(
+    detections_dir: Optional[Path] = Field(
         default=None,
         description="Directory for saving detection images"
     )
@@ -309,73 +311,51 @@ class AppConfig(BaseSettings):
         env_prefix = "LIMA_"
         case_sensitive = False
 
-    @validator("model_dir", "data_dir", "log_dir", pre=True, always=True)
-    def set_directory_paths(cls, v, values):
-        """Set default directory paths if not provided"""
-        if v is None and "project_root" in values:
-            project_root = values["project_root"]
+    def model_post_init(self, __context: Any) -> None:
+        """Post-initialization hook to set up paths"""
+        # Set up directory paths
+        if self.model_dir is None:
+            self.model_dir = self.project_root / "models"
 
-            if v is None:
-                # Determine which field is being validated
-                import inspect
-                frame = inspect.currentframe()
-                field_name = frame.f_locals.get('field').name
+        if self.data_dir is None:
+            self.data_dir = self.project_root / "data"
 
-                if field_name == "model_dir":
-                    v = project_root / "models"
-                elif field_name == "data_dir":
-                    v = project_root / "data"
-                elif field_name == "log_dir":
-                    v = project_root / "logs"
+        if self.log_dir is None:
+            self.log_dir = self.project_root / "logs"
 
-        # Create directory if it doesn't exist
-        if v and not v.exists():
-            v.mkdir(parents=True, exist_ok=True)
+        # Create directories if they don't exist
+        for dir_path in [self.model_dir, self.data_dir, self.log_dir]:
+            if dir_path and not dir_path.exists():
+                dir_path.mkdir(parents=True, exist_ok=True)
 
-        return v
+        # Set database path
+        if self.db_path is None:
+            self.db_path = self.data_dir / "traffic_counts.db"
 
-    @validator("db_path", pre=True, always=True)
-    def set_db_path(cls, v, values):
-        """Set default database path if not provided"""
-        if v is None and "data_dir" in values:
-            v = values["data_dir"] / "traffic_counts.db"
+        # Ensure database parent directory exists
+        if self.db_path and not self.db_path.parent.exists():
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Ensure parent directory exists
-        if v and not v.parent.exists():
-            v.parent.mkdir(parents=True, exist_ok=True)
-
-        return v
-
-    @validator("weights_path", pre=True, always=True)
-    def set_weights_path(cls, v, values):
-        """Set default weights path if not provided"""
-        if v is None and "model_dir" in values:
+        # Set weights path
+        if self.weights_path is None and self.model_dir:
             # Look for model files
-            model_dir = values["model_dir"]
-
-            # Priority: .xml (OpenVINO) > .onnx > .engine (TensorRT)
             for ext in ['.xml', '.onnx', '.engine']:
-                model_files = list(model_dir.glob(f'*{ext}'))
+                model_files = list(self.model_dir.glob(f'*{ext}'))
                 if model_files:
-                    v = model_files[0]  # Use first found
+                    self.weights_path = model_files[0]
                     break
 
-            if v is None:
-                # Default fallback
-                v = model_dir / "yolov7-tiny.onnx"
+            if self.weights_path is None:
+                self.weights_path = self.model_dir / "yolov7-tiny.onnx"
 
-        return v
+        # Set detections directory
+        if self.save_detections and self.detections_dir is None:
+            self.detections_dir = self.data_dir / "detections"
+            if not self.detections_dir.exists():
+                self.detections_dir.mkdir(parents=True, exist_ok=True)
 
-    @validator("detections_dir", pre=True, always=True)
-    def set_detections_dir(cls, v, values):
-        """Set detections directory if saving is enabled"""
-        if values.get("save_detections") and v is None and "data_dir" in values:
-            v = values["data_dir"] / "detections"
-            v.mkdir(parents=True, exist_ok=True)
-
-        return v
-
-    @validator("vehicle_classes", pre=False)
+    @field_validator("vehicle_classes")
+    @classmethod
     def validate_vehicle_classes(cls, v):
         """Ensure vehicle classes are valid"""
         valid_classes = {
@@ -411,21 +391,74 @@ class AppConfig(BaseSettings):
 
     def to_dict(self) -> dict:
         """Convert config to dictionary"""
-        return self.dict(exclude_none=True)
+        return self.model_dump(exclude_none=True, mode='json')
 
-    def save(self, path: Path):
+    def save(self, path: Union[str, Path]) -> None:
         """Save configuration to file"""
-        import json
-        with open(path, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2, default=str)
+        path = Path(path)
+
+        # Ensure parent directory exists
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert to JSON-serializable format
+        data = self.model_dump(exclude_none=True, mode='json')
+
+        # Convert Path objects to strings for JSON serialization
+        def convert_paths(obj):
+            if isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_paths(item) for item in obj]
+            elif isinstance(obj, Path):
+                return str(obj)
+            else:
+                return obj
+
+        data = convert_paths(data)
+
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
 
     @classmethod
-    def load(cls, path: Path) -> "AppConfig":
+    def load(cls, path: Union[str, Path]) -> "AppConfig":
         """Load configuration from file"""
-        import json
-        with open(path, 'r') as f:
-            data = json.load(f)
-        return cls(**data)
+        path = Path(path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # Convert string paths back to Path objects
+            def convert_strings_to_paths(obj, path_fields):
+                if isinstance(obj, dict):
+                    result = {}
+                    for k, v in obj.items():
+                        if k in path_fields and isinstance(v, str):
+                            result[k] = Path(v)
+                        elif isinstance(v, dict):
+                            result[k] = convert_strings_to_paths(v, path_fields)
+                        else:
+                            result[k] = v
+                    return result
+                return obj
+
+            # List of fields that should be Path objects
+            path_fields = {
+                'project_root', 'model_dir', 'data_dir', 'db_path',
+                'weights_path', 'log_dir', 'detections_dir'
+            }
+
+            data = convert_strings_to_paths(data, path_fields)
+
+            return cls(**data)
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in configuration file {path}: {e}")
+        except Exception as e:
+            raise ValueError(f"Error loading configuration from {path}: {e}")
 
 
 class CountingLineConfig(BaseSettings):

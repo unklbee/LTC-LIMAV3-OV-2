@@ -5,18 +5,17 @@ Main entry point for LIMA Traffic Counter application.
 
 import sys
 import asyncio
-import logging
 from pathlib import Path
 from typing import Optional
 
 # Qt imports
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QCoreApplication, Qt
-from qasync import QEventLoop, asyncSlot
+from PySide6.QtCore import Qt
+from qasync import QEventLoop
 
 # Application imports
 from src.ui.controllers.app_controller import AppController
-from src.models.config import AppConfig, get_config, set_config
+from src.models.config import AppConfig, set_config
 from src.utils.logger import setup_logging
 
 import structlog

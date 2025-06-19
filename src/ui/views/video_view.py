@@ -5,21 +5,19 @@ Enhanced video view with overlay controls and interactive ROI/line drawing.
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QSlider, QFrame, QToolBar, QFileDialog,
+    QComboBox, QSlider, QToolBar, QFileDialog,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsPolygonItem, QGraphicsLineItem, QMenu
+    QGraphicsPolygonItem, QMenu
 )
 from PySide6.QtCore import (
-    Qt, Signal, Slot, QPointF, QRectF, QTimer,
-    QPropertyAnimation, QEasingCurve
+    Qt, Signal, QPointF
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QPolygonF,
-    QColor, QFont, QAction, QKeySequence, QTransform
+    QColor, QAction, QKeySequence
 )
 import numpy as np
-from typing import List, Tuple, Optional, Dict
-from datetime import datetime
+from typing import List, Optional
 import cv2
 
 import structlog
@@ -516,26 +514,24 @@ class VideoView(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
+        """Setup video view UI"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 1. Video display widget dulu
-        self.video_widget = InteractiveVideoWidget()
-
-        # 2. Toolbar (butuh self.video_widget)
+        # Toolbar
         self.toolbar = self._create_toolbar()
         layout.addWidget(self.toolbar)
 
-        # 3. Connect signal ROI/Line dari video_widget
+        # Video display
+        self.video_widget = InteractiveVideoWidget()
         self.video_widget.roi_defined.connect(self.roi_defined)
         self.video_widget.line_defined.connect(self.line_defined)
         layout.addWidget(self.video_widget, 1)
 
-        # 4. Control bar
+        # Control bar
         self.control_bar = VideoControlBar()
         layout.addWidget(self.control_bar)
-
 
     def _create_toolbar(self) -> QToolBar:
         """Create video toolbar"""

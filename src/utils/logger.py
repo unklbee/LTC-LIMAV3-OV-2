@@ -162,7 +162,7 @@ def setup_logging(log_level: int = logging.INFO,
                   remote_api_key: Optional[str] = None):
     """
     Setup application logging with multiple handlers.
-
+    
     Args:
         log_level: Logging level
         log_to_file: Enable file logging

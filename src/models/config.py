@@ -2,8 +2,8 @@
 """
 Application configuration model with validation using Pydantic.
 """
-from pydantic_settings import BaseSettings
-from pydantic import Field, validator, DirectoryPath, FilePath
+
+from pydantic import BaseSettings, Field, validator, DirectoryPath, FilePath
 from typing import List, Dict, Optional, Union
 from pathlib import Path
 import os
@@ -273,7 +273,7 @@ class AppConfig(BaseSettings):
     # === Export Settings ===
     export_format: str = Field(
         default="excel",
-        pattern="^(excel|csv|json|pdf|html)$",
+        regex="^(excel|csv|json|pdf|html)$",
         description="Default export format"
     )
 
@@ -309,35 +309,24 @@ class AppConfig(BaseSettings):
         env_prefix = "LIMA_"
         case_sensitive = False
 
-    @validator("model_dir", pre=True, always=True)
-    def set_model_dir(cls, v, values):
-        """Set model directory path if not provided"""
+    @validator("model_dir", "data_dir", "log_dir", pre=True, always=True)
+    def set_directory_paths(cls, v, values):
+        """Set default directory paths if not provided"""
         if v is None and "project_root" in values:
-            v = values["project_root"] / "models"
+            project_root = values["project_root"]
 
-        # Create directory if it doesn't exist
-        if v and not v.exists():
-            v.mkdir(parents=True, exist_ok=True)
+            if v is None:
+                # Determine which field is being validated
+                import inspect
+                frame = inspect.currentframe()
+                field_name = frame.f_locals.get('field').name
 
-        return v
-
-    @validator("data_dir", pre=True, always=True)
-    def set_data_dir(cls, v, values):
-        """Set data directory path if not provided"""
-        if v is None and "project_root" in values:
-            v = values["project_root"] / "data"
-
-        # Create directory if it doesn't exist
-        if v and not v.exists():
-            v.mkdir(parents=True, exist_ok=True)
-
-        return v
-
-    @validator("log_dir", pre=True, always=True)
-    def set_log_dir(cls, v, values):
-        """Set log directory path if not provided"""
-        if v is None and "project_root" in values:
-            v = values["project_root"] / "logs"
+                if field_name == "model_dir":
+                    v = project_root / "models"
+                elif field_name == "data_dir":
+                    v = project_root / "data"
+                elif field_name == "log_dir":
+                    v = project_root / "logs"
 
         # Create directory if it doesn't exist
         if v and not v.exists():
@@ -382,8 +371,7 @@ class AppConfig(BaseSettings):
         """Set detections directory if saving is enabled"""
         if values.get("save_detections") and v is None and "data_dir" in values:
             v = values["data_dir"] / "detections"
-            if not v.exists():
-                v.mkdir(parents=True, exist_ok=True)
+            v.mkdir(parents=True, exist_ok=True)
 
         return v
 

@@ -5,7 +5,7 @@ Export service for generating reports in various formats.
 
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np

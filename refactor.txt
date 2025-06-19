@@ -1,0 +1,718 @@
+# LIMA Traffic Counter - Refactored Architecture
+
+## 🏗️ New Project Structure
+
+```
+lima_traffic_counter/
+├── src/
+│   ├── core/                      # Core business logic
+│   │   ├── __init__.py
+│   │   ├── detector.py           # Detection engine with optimizations
+│   │   ├── tracker.py            # Enhanced tracking with ByteTrack
+│   │   ├── counter.py            # Counting logic decoupled from tracking
+│   │   ├── pipeline.py           # Async pipeline orchestrator
+│   │   └── filters.py            # ROI and class filtering
+│   │
+│   ├── models/                    # Data models and schemas
+│   │   ├── __init__.py
+│   │   ├── detection.py          # Detection result models
+│   │   ├── tracking.py           # Tracking state models
+│   │   └── config.py             # Configuration models with Pydantic
+│   │
+│   ├── services/                  # Service layer
+│   │   ├── __init__.py
+│   │   ├── video_service.py      # Video capture abstraction
+│   │   ├── database_service.py   # DB operations with connection pooling
+│   │   ├── api_service.py        # API client with retry logic
+│   │   └── export_service.py     # Export to CSV/JSON/Excel
+│   │
+│   ├── ui/                        # Modern UI with MVC pattern
+│   │   ├── __init__.py
+│   │   ├── views/                # View components
+│   │   │   ├── main_view.py      # Main window with modern design
+│   │   │   ├── video_view.py     # Enhanced video display with overlay
+│   │   │   ├── dashboard_view.py # Real-time statistics dashboard
+│   │   │   └── settings_view.py  # Tabbed settings dialog
+│   │   │
+│   │   ├── controllers/          # Controllers
+│   │   │   ├── app_controller.py # Main application controller
+│   │   │   ├── video_controller.py
+│   │   │   └── counting_controller.py
+│   │   │
+│   │   ├── widgets/              # Custom widgets
+│   │   │   ├── modern_button.py  # Styled buttons with animations
+│   │   │   ├── stat_card.py      # Statistics display cards
+│   │   │   ├── timeline_graph.py # Real-time counting graph
+│   │   │   └── roi_editor.py     # Interactive ROI/Line editor
+│   │   │
+│   │   └── themes/               # UI themes
+│   │       ├── dark_theme.py
+│   │       └── light_theme.py
+│   │
+│   ├── utils/                     # Utilities
+│   │   ├── __init__.py
+│   │   ├── gpu_memory.py         # GPU memory management
+│   │   ├── performance.py        # Performance monitoring
+│   │   ├── validators.py         # Input validation
+│   │   └── async_utils.py        # Async helpers
+│   │
+│   └── main.py                   # Application entry point
+│
+├── resources/                     # Resources
+│   ├── icons/                    # Modern icon set
+│   ├── styles/                   # QSS stylesheets
+│   └── translations/             # i18n support
+│
+├── tests/                        # Comprehensive tests
+├── docs/                         # Documentation
+└── requirements.txt
+```
+
+## 🚀 Key Improvements
+
+### 1. **Enhanced Performance Pipeline**
+
+```python
+# src/core/pipeline.py
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncIterator, Optional
+import numpy as np
+from dataclasses import dataclass
+from queue import Queue
+import threading
+
+@dataclass
+class PipelineConfig:
+    """Configuration for optimized pipeline"""
+    buffer_size: int = 3
+    batch_size: int = 1  # For batched inference
+    use_gpu_decode: bool = True
+    num_inference_threads: int = 2
+    enable_tensorrt: bool = True
+
+class OptimizedPipeline:
+    """High-performance async pipeline with zero-copy optimization"""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._frame_pool = FramePool(size=10)  # Reusable frame buffers
+        self._stop_event = threading.Event()
+
+    async def process_stream(self, source: VideoSource) -> AsyncIterator[ProcessedFrame]:
+        """Main pipeline with parallel stages"""
+
+        # Stage 1: Decode (GPU accelerated if available)
+        decode_queue = asyncio.Queue(maxsize=self.config.buffer_size)
+        decode_task = asyncio.create_task(
+            self._decode_stage(source, decode_queue)
+        )
+
+        # Stage 2: Preprocess + Inference (batched)
+        inference_queue = asyncio.Queue(maxsize=self.config.buffer_size)
+        inference_task = asyncio.create_task(
+            self._inference_stage(decode_queue, inference_queue)
+        )
+
+        # Stage 3: Tracking + Counting
+        tracking_task = asyncio.create_task(
+            self._tracking_stage(inference_queue)
+        )
+
+        try:
+            async for frame in tracking_task:
+                yield frame
+        finally:
+            self._stop_event.set()
+            await asyncio.gather(decode_task, inference_task, tracking_task)
+```
+
+### 2. **Modern UI with Fluent Design**
+
+```python
+# src/ui/views/main_view.py
+from PySide6.QtWidgets import QMainWindow, QWidget
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QGraphicsDropShadowEffect
+
+class ModernMainWindow(QMainWindow):
+    """Main window with modern fluent design"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # Apply modern styling
+        self._setup_ui()
+        self._apply_theme()
+
+    def _setup_ui(self):
+        """Setup modern UI with animations"""
+        # Central widget with rounded corners and shadow
+        central = QWidget()
+        central.setObjectName("centralWidget")
+
+        # Add drop shadow
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setXOffset(0)
+        shadow.setYOffset(2)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        central.setGraphicsEffect(shadow)
+
+        # Layout with sidebar and main content
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Animated sidebar
+        self.sidebar = AnimatedSidebar()
+        self.content = ContentArea()
+
+        layout.addWidget(self.sidebar)
+        layout.addWidget(self.content, 1)
+```
+
+### 3. **Smart Detection with TensorRT Optimization**
+
+```python
+# src/core/detector.py
+import tensorrt as trt
+import pycuda.driver as cuda
+import openvino as ov
+from typing import List, Tuple
+import numpy as np
+
+class OptimizedDetector:
+    """Detection engine with multiple backend support"""
+
+    def __init__(self, model_path: str, device: str = "AUTO"):
+        self.device = device
+        self._init_backend(model_path)
+
+    def _init_backend(self, model_path: str):
+        """Initialize best available backend"""
+        if self.device == "GPU" and self._check_tensorrt():
+            self.backend = TensorRTBackend(model_path)
+        else:
+            self.backend = OpenVINOBackend(model_path, self.device)
+
+    async def detect_batch(self, frames: List[np.ndarray]) -> List[Detection]:
+        """Batched inference for better GPU utilization"""
+        # Prepare batch
+        batch = np.stack([self._preprocess(f) for f in frames])
+
+        # Run inference
+        results = await self.backend.infer_batch(batch)
+
+        # Post-process with NMS
+        return [self._postprocess(r) for r in results]
+
+class TensorRTBackend:
+    """TensorRT backend for NVIDIA GPUs"""
+
+    def __init__(self, model_path: str):
+        self.engine = self._build_engine(model_path)
+        self.context = self.engine.create_execution_context()
+        self._setup_buffers()
+
+    def _build_engine(self, onnx_path: str):
+        """Build optimized TensorRT engine"""
+        builder = trt.Builder(TRT_LOGGER)
+        config = builder.create_builder_config()
+
+        # Enable FP16 if supported
+        if builder.platform_has_fast_fp16:
+            config.set_flag(trt.BuilderFlag.FP16)
+
+        # Dynamic batch size
+        profile = builder.create_optimization_profile()
+        profile.set_shape("input", (1, 3, 640, 640),
+                         (4, 3, 640, 640),
+                         (8, 3, 640, 640))
+        config.add_optimization_profile(profile)
+
+        # Parse ONNX
+        network = builder.create_network(EXPLICIT_BATCH)
+        parser = trt.OnnxParser(network, TRT_LOGGER)
+        parser.parse_from_file(onnx_path)
+
+        return builder.build_engine(network, config)
+```
+
+### 4. **Enhanced Tracking with ByteTrack**
+
+```python
+# src/core/tracker.py
+import numpy as np
+from typing import Dict, List, Tuple
+from collections import defaultdict
+
+class ByteTracker:
+    """Enhanced tracker with better association logic"""
+
+    def __init__(self, track_thresh: float = 0.5,
+                 track_buffer: int = 30,
+                 match_thresh: float = 0.8):
+        self.track_thresh = track_thresh
+        self.track_buffer = track_buffer
+        self.match_thresh = match_thresh
+        self.tracks: Dict[int, Track] = {}
+        self.track_id_counter = 0
+
+    def update(self, detections: np.ndarray) -> List[Track]:
+        """Update tracks with new detections"""
+        # Separate high and low confidence detections
+        high_dets = detections[detections[:, 4] > self.track_thresh]
+        low_dets = detections[detections[:, 4] <= self.track_thresh]
+
+        # First association with high confidence detections
+        matched, unmatched_tracks, unmatched_dets = \
+            self._associate(self.tracks, high_dets)
+
+        # Second association with low confidence detections
+        remaining_tracks = [self.tracks[i] for i in unmatched_tracks]
+        second_matched, still_unmatched_tracks, _ = \
+            self._associate(remaining_tracks, low_dets)
+
+        # Update matched tracks
+        for track_idx, det_idx in matched:
+            self.tracks[track_idx].update(high_dets[det_idx])
+
+        # Create new tracks
+        for det_idx in unmatched_dets:
+            self._create_track(high_dets[det_idx])
+
+        # Remove lost tracks
+        self._remove_lost_tracks(still_unmatched_tracks)
+
+        return list(self.tracks.values())
+```
+
+### 5. **Real-time Dashboard**
+
+```python
+# src/ui/widgets/dashboard_view.py
+from PySide6.QtWidgets import QWidget, QGridLayout
+from PySide6.QtCore import QTimer
+import pyqtgraph as pg
+
+class DashboardView(QWidget):
+    """Real-time statistics dashboard"""
+
+    def __init__(self):
+        super().__init__()
+        self._setup_ui()
+        self._setup_graphs()
+
+    def _setup_ui(self):
+        layout = QGridLayout(self)
+
+        # Statistics cards
+        self.fps_card = StatCard("FPS", "0", color="#4CAF50")
+        self.total_card = StatCard("Total Vehicles", "0", color="#2196F3")
+        self.current_card = StatCard("Current", "0", color="#FF9800")
+
+        # Real-time graph
+        self.timeline_graph = TimelineGraph()
+        self.timeline_graph.setLabel('left', 'Vehicles/min')
+        self.timeline_graph.setLabel('bottom', 'Time')
+
+        # Vehicle type distribution
+        self.type_chart = VehicleTypeChart()
+
+        # Heatmap
+        self.heatmap = TrafficHeatmap()
+
+        # Layout
+        layout.addWidget(self.fps_card, 0, 0)
+        layout.addWidget(self.total_card, 0, 1)
+        layout.addWidget(self.current_card, 0, 2)
+        layout.addWidget(self.timeline_graph, 1, 0, 1, 3)
+        layout.addWidget(self.type_chart, 2, 0, 1, 2)
+        layout.addWidget(self.heatmap, 2, 2)
+
+class TimelineGraph(pg.PlotWidget):
+    """Real-time timeline graph with smooth updates"""
+
+    def __init__(self):
+        super().__init__()
+        self.setBackground('#1e1e1e')
+        self.showGrid(x=True, y=True, alpha=0.3)
+
+        # Data buffers
+        self.time_buffer = deque(maxlen=300)  # 5 minutes at 1Hz
+        self.count_buffer = deque(maxlen=300)
+
+        # Plot lines for each vehicle type
+        self.plots = {}
+        for vehicle_type, color in VEHICLE_COLORS.items():
+            self.plots[vehicle_type] = self.plot(
+                pen=pg.mkPen(color, width=2)
+            )
+```
+
+### 6. **Database Service with Connection Pooling**
+
+```python
+# src/services/database_service.py
+import asyncio
+import aiosqlite
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional
+import pandas as pd
+
+class DatabaseService:
+    """Async database service with connection pooling"""
+
+    def __init__(self, db_path: str, pool_size: int = 5):
+        self.db_path = db_path
+        self.pool = AsyncConnectionPool(db_path, pool_size)
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Context manager for transactions"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("BEGIN")
+            try:
+                yield conn
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def insert_counts(self, counts: Dict[str, int],
+                          timestamp: datetime) -> None:
+        """Insert counts with automatic batching"""
+        async with self.transaction() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO vehicle_counts
+                (timestamp, vehicle_type, count, host_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(timestamp, vtype, count, self.host_id)
+                 for vtype, count in counts.items()]
+            )
+
+    async def get_statistics(self,
+                           start_time: datetime,
+                           end_time: datetime) -> pd.DataFrame:
+        """Get statistics as pandas DataFrame"""
+        async with self.pool.acquire() as conn:
+            df = await conn.execute_fetchdf(
+                """
+                SELECT
+                    timestamp,
+                    vehicle_type,
+                    SUM(count) as total_count,
+                    AVG(count) as avg_count
+                FROM vehicle_counts
+                WHERE timestamp BETWEEN ? AND ?
+                GROUP BY timestamp, vehicle_type
+                ORDER BY timestamp
+                """,
+                (start_time, end_time)
+            )
+        return df
+```
+
+### 7. **Configuration with Pydantic**
+
+```python
+# src/models/config.py
+from pydantic import BaseSettings, Field, validator
+from typing import List, Dict, Optional
+from pathlib import Path
+
+class AppConfig(BaseSettings):
+    """Application configuration with validation"""
+
+    # Paths
+    model_dir: Path = Field(default=Path("models"))
+    data_dir: Path = Field(default=Path("data"))
+    db_path: Path = Field(default=Path("data/counts.db"))
+
+    # Detection settings
+    confidence_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    nms_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+
+    # Performance settings
+    use_gpu: bool = Field(default=True)
+    batch_size: int = Field(default=4, ge=1, le=32)
+    num_workers: int = Field(default=4, ge=1, le=16)
+
+    # API settings
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    api_timeout: int = Field(default=30, ge=1)
+
+    # UI settings
+    theme: str = Field(default="dark", regex="^(dark|light)$")
+    language: str = Field(default="en")
+
+    class Config:
+        env_file = ".env"
+        env_prefix = "LIMA_"
+
+    @validator("model_dir", "data_dir", "db_path")
+    def create_paths(cls, v):
+        """Create directories if they don't exist"""
+        if isinstance(v, Path):
+            v.parent.mkdir(parents=True, exist_ok=True)
+        return v
+```
+
+### 8. **Export Service**
+
+```python
+# src/services/export_service.py
+import pandas as pd
+from typing import List, Dict
+import asyncio
+from pathlib import Path
+
+class ExportService:
+    """Export counting data to various formats"""
+
+    async def export_to_excel(self,
+                            data: pd.DataFrame,
+                            output_path: Path,
+                            include_charts: bool = True) -> None:
+        """Export to Excel with charts"""
+        with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+            # Write data
+            data.to_excel(writer, sheet_name='Raw Data', index=False)
+
+            # Create summary sheet
+            summary = self._create_summary(data)
+            summary.to_excel(writer, sheet_name='Summary')
+
+            if include_charts:
+                # Add charts
+                workbook = writer.book
+                chart_sheet = workbook.add_worksheet('Charts')
+
+                # Timeline chart
+                timeline_chart = workbook.add_chart({
+                    'type': 'line',
+                    'subtype': 'smooth'
+                })
+
+                # Configure chart...
+
+    async def export_to_csv(self,
+                          data: pd.DataFrame,
+                          output_path: Path) -> None:
+        """Export to CSV"""
+        await asyncio.to_thread(
+            data.to_csv, output_path, index=False
+        )
+
+    async def generate_report(self,
+                            start_date: datetime,
+                            end_date: datetime,
+                            template: str = "default") -> Path:
+        """Generate PDF report"""
+        # Implementation...
+```
+
+### 9. **Error Handling and Logging**
+
+```python
+# src/utils/logger.py
+import logging
+import structlog
+from pathlib import Path
+
+def setup_logging(log_dir: Path = Path("logs")):
+    """Setup structured logging"""
+    log_dir.mkdir(exist_ok=True)
+
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer()
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # File handler for structured logs
+    file_handler = logging.FileHandler(
+        log_dir / f"lima_{datetime.now():%Y%m%d}.jsonl"
+    )
+
+    # Console handler for human-readable logs
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[file_handler, console_handler]
+    )
+```
+
+### 10. **Main Application Entry**
+
+```python
+# src/main.py
+import sys
+import asyncio
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication
+from qasync import QEventLoop
+
+from src.ui.controllers.app_controller import AppController
+from src.models.config import AppConfig
+from src.utils.logger import setup_logging
+
+async def main():
+    """Main application entry point"""
+    # Load configuration
+    config = AppConfig()
+
+    # Setup logging
+    setup_logging(config.log_dir)
+
+    # Create Qt application
+    app = QApplication(sys.argv)
+    app.setApplicationName("LIMA Traffic Counter")
+    app.setOrganizationName("Lintas Mediatama")
+
+    # Set application style
+    if config.theme == "dark":
+        app.setStyleSheet(load_dark_theme())
+
+    # Create async event loop
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    # Initialize application controller
+    controller = AppController(config)
+    await controller.initialize()
+
+    # Show main window
+    controller.show()
+
+    # Run event loop
+    with loop:
+        await loop.run_forever()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 🎯 Performance Optimizations
+
+1. **Zero-Copy Frame Processing**: Reuse frame buffers to minimize memory allocation
+2. **GPU Memory Pinning**: Pin frequently used memory for faster GPU transfers
+3. **Batched Inference**: Process multiple frames in single inference call
+4. **Async I/O**: All I/O operations are async to prevent blocking
+5. **Connection Pooling**: Database and API connections are pooled
+6. **Lazy Loading**: Load models and resources only when needed
+
+## 🎨 UI/UX Improvements
+
+1. **Modern Design**: Fluent design with animations and smooth transitions
+2. **Dark/Light Themes**: User-selectable themes with proper contrast
+3. **Real-time Dashboard**: Live statistics and visualizations
+4. **Intuitive Workflow**: Guided setup process with validation
+5. **Responsive Layout**: Adapts to different screen sizes
+6. **Accessibility**: Keyboard shortcuts and screen reader support
+
+## 📦 Installation
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install development dependencies
+pip install -r requirements-dev.txt
+
+# Run application
+python -m src.main
+```
+
+## 🧪 Testing
+
+```bash
+# Run unit tests
+pytest tests/unit
+
+# Run integration tests
+pytest tests/integration
+
+# Run with coverage
+pytest --cov=src --cov-report=html
+
+# Run performance benchmarks
+pytest tests/benchmarks -v
+```
+
+## 📋 Configuration
+
+Create a `.env` file in the project root:
+
+```env
+LIMA_MODEL_DIR=./models
+LIMA_DATA_DIR=./data
+LIMA_DB_PATH=./data/counts.db
+LIMA_USE_GPU=true
+LIMA_BATCH_SIZE=4
+LIMA_API_URL=https://api.example.com/counts
+LIMA_API_KEY=your-api-key
+LIMA_THEME=dark
+LIMA_LANGUAGE=en
+```
+
+## 🚀 Deployment
+
+```bash
+# Build executable with PyInstaller
+pyinstaller lima.spec
+
+# Build installer
+python setup.py bdist_msi  # Windows
+python setup.py bdist_dmg  # macOS
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

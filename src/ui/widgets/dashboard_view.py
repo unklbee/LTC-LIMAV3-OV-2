@@ -1,4 +1,3 @@
-# src/ui/widgets/dashboard_view.py
 from PySide6.QtWidgets import QWidget, QGridLayout
 from PySide6.QtCore import QTimer
 import pyqtgraph as pg

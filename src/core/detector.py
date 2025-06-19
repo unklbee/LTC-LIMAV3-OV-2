@@ -257,7 +257,7 @@ class TensorRTBackend(DetectorBackend):
 
         for i in range(batch_size):
             # Extract detections for this image
-            # Format: [batch, num_detections, 7]
+            # Format: [batch, num_detections, 7] 
             # where 7 = [x1, y1, x2, y2, obj_conf, class_conf, class_id]
             detections = outputs[0][i]
 

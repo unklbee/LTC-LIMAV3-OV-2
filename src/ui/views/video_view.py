@@ -516,24 +516,26 @@ class VideoView(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        """Setup video view UI"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Toolbar
+        # 1. Video display widget dulu
+        self.video_widget = InteractiveVideoWidget()
+
+        # 2. Toolbar (butuh self.video_widget)
         self.toolbar = self._create_toolbar()
         layout.addWidget(self.toolbar)
 
-        # Video display
-        self.video_widget = InteractiveVideoWidget()
+        # 3. Connect signal ROI/Line dari video_widget
         self.video_widget.roi_defined.connect(self.roi_defined)
         self.video_widget.line_defined.connect(self.line_defined)
         layout.addWidget(self.video_widget, 1)
 
-        # Control bar
+        # 4. Control bar
         self.control_bar = VideoControlBar()
         layout.addWidget(self.control_bar)
+
 
     def _create_toolbar(self) -> QToolBar:
         """Create video toolbar"""

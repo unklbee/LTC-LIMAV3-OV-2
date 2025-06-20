@@ -391,12 +391,23 @@ class OptimizedPipeline:
 
                 # Update tracks
                 if frame_data.detections is not None:
-                    tracks = self.tracker.update(frame_data.detections)
-                    frame_data.tracks = tracks
-
+                    # Patch: convert detections list to numpy array if needed
+                    detections = frame_data.detections
+                    if isinstance(detections, list):
+                        # List of Detection class: convert to array [x1,y1,x2,y2,conf,class_id]
+                        if len(detections) > 0 and hasattr(detections[0], 'x1'):
+                            det_arr = np.array([
+                                [d.x1, d.y1, d.x2, d.y2, d.confidence, d.class_id]
+                                for d in detections
+                            ], dtype=np.float32)
+                        else:
+                            # Already array or empty
+                            det_arr = np.array(detections, dtype=np.float32)
+                        detections = det_arr
+                    frame_data.tracks = self.tracker.update(detections)
                     # Update counts
-                    if self.counter and tracks:
-                        counts = self.counter.update(tracks)
+                    if self.counter and frame_data.tracks:
+                        counts = self.counter.update(frame_data.tracks)
                         frame_data.metadata['counts'] = counts
                 else:
                     frame_data.tracks = []

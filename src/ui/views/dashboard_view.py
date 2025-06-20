@@ -606,9 +606,9 @@ class DashboardView(QWidget):
         # Update speed stats
         if 'avg_speed' in stats:
             self.avg_speed_label.findChild(QLabel, "AverageSpeedValue").setText(
-                f"{stats['avg_speed']:.1f} km/h"
+                f"{stats['avg_speed']:.1f} km/h" if stats['avg_speed'] is not None else "-"
             )
         if 'max_speed' in stats:
             self.max_speed_label.findChild(QLabel, "MaxSpeedValue").setText(
-                f"{stats['max_speed']:.1f} km/h"
+                f"{stats['avg_speed']:.1f} km/h" if stats['avg_speed'] is not None else "-"
             )

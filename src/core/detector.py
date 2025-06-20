@@ -572,31 +572,29 @@ class OptimizedDetector:
         return filtered_results
 
     def _preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess image for model input"""
-        # Resize with letterbox
+        # If already CHW float32 & 640x640, skip preprocessing
+        if (image.shape == (1, 3, 640, 640) or image.shape == (3, 640, 640) or image.shape == (640, 640,
+                                                                                               3)) and image.dtype == np.float32:
+            # If NCHW, leave as is
+            if image.shape == (1, 3, 640, 640):
+                return image
+            # If CHW, add batch dimension
+            if image.shape == (3, 640, 640):
+                return image[None]
+            # If HWC, transpose and batch
+            if image.shape == (640, 640, 3):
+                return image.transpose(2, 0, 1)[None]
+        # Normal pipeline for any other shape (e.g. raw BGR)
         target_size = (640, 640)
         h, w = image.shape[:2]
-
-        # Calculate scale
         scale = min(target_size[0] / h, target_size[1] / w)
         new_h, new_w = int(h * scale), int(w * scale)
-
-        # Resize
         resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        # Create padded image
         padded = np.full((target_size[0], target_size[1], 3), 114, dtype=np.uint8)
-
-        # Calculate padding
         pad_h = (target_size[0] - new_h) // 2
         pad_w = (target_size[1] - new_w) // 2
-
-        # Place resized image
         padded[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
-
-        # Convert to tensor format (CHW, normalized)
         tensor = padded.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-
         return tensor
 
     def get_performance_stats(self) -> dict:

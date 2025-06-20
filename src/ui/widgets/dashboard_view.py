@@ -2,6 +2,9 @@ from PySide6.QtWidgets import QWidget, QGridLayout
 from PySide6.QtCore import QTimer
 import pyqtgraph as pg
 
+from src.ui.widgets.stat_card import StatCard
+
+
 class DashboardView(QWidget):
     """Real-time statistics dashboard"""
 

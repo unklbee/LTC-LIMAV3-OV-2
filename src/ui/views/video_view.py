@@ -554,15 +554,17 @@ class VideoView(QWidget):
 
         toolbar.addSeparator()
 
-        # ROI/Line tools
+        # ROI/Line tools (initially disabled)
         self.roi_btn = QAction("Define ROI", self)
         self.roi_btn.setShortcut(QKeySequence("Ctrl+R"))
         self.roi_btn.triggered.connect(self.video_widget.start_roi_drawing)
+        self.roi_btn.setEnabled(False)  # Disabled until video loaded
         toolbar.addAction(self.roi_btn)
 
         self.line_btn = QAction("Define Line", self)
         self.line_btn.setShortcut(QKeySequence("Ctrl+L"))
         self.line_btn.triggered.connect(self.video_widget.start_line_drawing)
+        self.line_btn.setEnabled(False)  # Disabled until video loaded
         toolbar.addAction(self.line_btn)
 
         self.clear_btn = QAction("Clear Overlays", self)
@@ -574,11 +576,15 @@ class VideoView(QWidget):
         # Start/Stop
         self.start_btn = QPushButton("Start Detection")
         self.start_btn.setObjectName("startButton")
-        self.start_btn.setCheckable(True)
         self.start_btn.clicked.connect(self._toggle_detection)
         toolbar.addWidget(self.start_btn)
 
-        # Style
+        # Add help text
+        help_label = QLabel("💡 Select video → Define ROI → Define counting lines → Start detection")
+        help_label.setStyleSheet("color: #888; font-size: 11px; margin-left: 10px;")
+        toolbar.addWidget(help_label)
+
+        # Apply styles...
         toolbar.setStyleSheet("""
             QToolBar {
                 background-color: #2d2d2d;
@@ -608,6 +614,10 @@ class VideoView(QWidget):
             #startButton:checked {
                 background-color: #f44336;
             }
+            
+            QAction:disabled {
+                color: #666;
+            }
         """)
 
         return toolbar
@@ -621,24 +631,47 @@ class VideoView(QWidget):
         else:
             self.source_btn.setText("Enter URL")
 
+    def load_preview_frame(self, source):
+        """Load first frame of video for preview"""
+        try:
+            import cv2
+
+            # Open video source
+            if isinstance(source, int):
+                cap = cv2.VideoCapture(source)
+            else:
+                cap = cv2.VideoCapture(str(source))
+
+            if not cap.isOpened():
+                return False
+
+            # Read first frame
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                # Display frame
+                self.video_widget.display_frame(frame)
+
+                # Enable ROI/Line tools
+                self.roi_btn.setEnabled(True)
+                self.line_btn.setEnabled(True)
+
+                logger.info("Preview frame loaded successfully")
+                return True
+
+            cap.release()
+            return False
+
+        except Exception as e:
+            logger.error(f"Failed to load preview: {e}")
+            return False
+
     def _select_source(self):
         """Select video source"""
         source_type = self.source_combo.currentText()
 
         if source_type == "Webcam":
-            # Show camera selection dialog
-            cameras = self._get_available_cameras()
-            if cameras:
-                camera, ok = QInputDialog.getItem(
-                    self, "Select Camera", "Available cameras:",
-                    [f"Camera {i}" for i in range(len(cameras))],
-                    0, False
-                )
-                if ok:
-                    cam_index = int(camera.split()[-1])
-                    self.source_changed.emit(cam_index)
-            else:
-                self.source_changed.emit(0)  # Default camera
+            # TODO: Show camera selection dialog
+            self.source_changed.emit(0)  # Default camera
 
         elif source_type == "File":
             file_path, _ = QFileDialog.getOpenFileName(
@@ -650,6 +683,8 @@ class VideoView(QWidget):
 
             if file_path:
                 self.source_changed.emit(file_path)
+                # Load preview frame immediately
+                self.load_preview_frame(file_path)
 
         else:  # RTSP Stream
             url, ok = QInputDialog.getText(
@@ -672,12 +707,23 @@ class VideoView(QWidget):
 
     def _toggle_detection(self):
         """Toggle detection on/off"""
-        if self.start_btn.isChecked():
+        logger.info(f"Detection toggle clicked. Current state: {self.start_btn.text()}")
+
+        if self.start_btn.text() == "Start Detection":
+            logger.info("Emitting start_requested signal")
             self.start_btn.setText("Stop Detection")
+            self.start_btn.setChecked(True)
             self.start_requested.emit()
         else:
+            logger.info("Emitting stop_requested signal")
             self.start_btn.setText("Start Detection")
+            self.start_btn.setChecked(False)
             self.stop_requested.emit()
+
+    # Tambahkan method untuk menampilkan error ke user
+    def show_error_message(self, message: str):
+        """Show error message to user"""
+        from PySide6.QtWidgets import QMessageBox
 
     def set_vehicle_classes(self, classes: List[str]):
         """Set available vehicle classes"""

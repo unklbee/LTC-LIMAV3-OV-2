@@ -43,33 +43,59 @@ class PipelineStats:
 
 
 class FramePool:
-    """Pool of reusable frame buffers to minimize allocations"""
+    """Improved frame pool with dynamic sizing"""
 
-    def __init__(self, size: int, frame_shape: Tuple[int, int, int]):
-        self.pool = Queue(maxsize=size)
-        self.frame_shape = frame_shape
+    def __init__(self, initial_size: int = 10, max_size: int = 50):
+        self.pool = Queue(maxsize=max_size)
+        self.max_size = max_size
+        self.allocated_count = 0
+        self._lock = threading.Lock()
 
-        # Pre-allocate buffers
-        for _ in range(size):
-            buffer = np.empty(frame_shape, dtype=np.uint8)
+        # Pre-allocate smaller initial pool
+        for _ in range(initial_size):
+            # Create empty buffer - will be resized on first use
+            buffer = np.empty((480, 640, 3), dtype=np.uint8)
             self.pool.put(buffer)
 
     def get(self, timeout: float = 1.0) -> np.ndarray:
-        """Get a buffer from pool"""
+        """Get buffer from pool with dynamic allocation"""
         try:
-            return self.pool.get(timeout=timeout)
+            buffer = self.pool.get(timeout=timeout)
+            with self._lock:
+                self.allocated_count += 1
+            return buffer
         except Empty:
-            # Allocate new buffer if pool is empty
-            logger.warning("Frame pool exhausted, allocating new buffer")
-            return np.empty(self.frame_shape, dtype=np.uint8)
+            with self._lock:
+                if self.allocated_count < self.max_size:
+                    # Allocate new buffer
+                    buffer = np.empty((480, 640, 3), dtype=np.uint8)
+                    self.allocated_count += 1
+                    logger.debug(f"Allocated new buffer, total: {self.allocated_count}")
+                    return buffer
+                else:
+                    logger.warning("Max frame pool size reached, waiting...")
+                    # Wait a bit longer
+                    try:
+                        buffer = self.pool.get(timeout=5.0)
+                        return buffer
+                    except Empty:
+                        logger.error("Frame pool completely exhausted")
+                        # Emergency allocation
+                        return np.empty((480, 640, 3), dtype=np.uint8)
 
     def put(self, buffer: np.ndarray) -> None:
         """Return buffer to pool"""
+        if buffer is None:
+            return
+
         try:
             self.pool.put_nowait(buffer)
+            with self._lock:
+                self.allocated_count = max(0, self.allocated_count - 1)
         except:
-            pass  # Pool is full, let GC handle it
-
+            # Pool is full or other error
+            with self._lock:
+                self.allocated_count = max(0, self.allocated_count - 1)
 
 class OptimizedPipeline:
     """
@@ -118,10 +144,14 @@ class OptimizedPipeline:
         }
 
     async def start(self, video_source) -> AsyncIterator[FrameData]:
-        """Start processing pipeline"""
+        """Start processing pipeline - IMPROVED VERSION"""
         logger.info("Starting optimized pipeline",
                     batch_size=self.batch_size,
                     use_gpu=self.use_gpu_decode)
+
+        # Validate video source
+        if not video_source.isOpened():
+            raise ValueError("Video source is not opened")
 
         # Initialize queues
         self._decode_queue = asyncio.Queue(maxsize=self.buffer_size)
@@ -129,17 +159,22 @@ class OptimizedPipeline:
         self._inference_queue = asyncio.Queue(maxsize=self.buffer_size)
         self._tracking_queue = asyncio.Queue(maxsize=self.buffer_size)
 
-        # Get frame dimensions
+        # Get frame dimensions safely
         ret, sample_frame = video_source.read()
-        if not ret:
-            raise ValueError("Cannot read from video source")
-        video_source.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset
+        if not ret or sample_frame is None:
+            raise ValueError("Cannot read sample frame from video source")
 
-        # Initialize frame pool
+        # Reset video to beginning
+        video_source.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Initialize improved frame pool
         self._frame_pool = FramePool(
-            size=self.buffer_size * 3,
-            frame_shape=sample_frame.shape
+            initial_size=self.buffer_size,
+            max_size=self.buffer_size * 4
         )
+
+        # Reset stop event
+        self._stop_event = threading.Event()
 
         # Start pipeline stages
         tasks = [
@@ -148,6 +183,9 @@ class OptimizedPipeline:
             asyncio.create_task(self._inference_stage()),
             asyncio.create_task(self._tracking_stage()),
         ]
+
+        frame_count = 0
+        start_time = time.time()
 
         try:
             # Yield processed frames
@@ -161,35 +199,65 @@ class OptimizedPipeline:
                     # Update statistics
                     self._update_stats(frame_data)
 
+                    # Yield frame
                     yield frame_data
 
+                    frame_count += 1
+
+                    # Log progress
+                    if frame_count % 100 == 0:
+                        elapsed = time.time() - start_time
+                        fps = frame_count / elapsed
+                        logger.info(f"Pipeline progress: {frame_count} frames, {fps:.1f} FPS")
+
                 except asyncio.TimeoutError:
+                    # Check if all stages are still running
+                    if all(task.done() for task in tasks):
+                        logger.info("All pipeline stages completed")
+                        break
                     continue
 
+        except Exception as e:
+            logger.error(f"Pipeline error: {e}")
+            raise
         finally:
             # Cleanup
             self._stop_event.set()
+            logger.info("Waiting for pipeline stages to stop...")
+
+            # Cancel tasks and wait
+            for task in tasks:
+                task.cancel()
+
             await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("Pipeline stopped")
 
     async def _decode_stage(self, video_source):
-        """Stage 1: Video decoding with GPU acceleration if available"""
+        """Stage 1: Video decoding - FIXED VERSION"""
         frame_id = 0
 
         while not self._stop_event.is_set():
             start_time = time.perf_counter()
 
-            # Get frame buffer from pool
-            buffer = self._frame_pool.get()
-
-            # Decode frame
-            ret = await asyncio.get_event_loop().run_in_executor(
+            # FIXED: OpenCV read() tidak menerima buffer parameter
+            ret, frame = await asyncio.get_event_loop().run_in_executor(
                 self._executor,
-                video_source.read,
-                buffer  # Read directly into buffer
+                video_source.read
             )
 
-            if not ret:
+            if not ret or frame is None:
+                logger.info("End of video or read failed")
                 break
+
+            # Get buffer from pool dan copy frame ke buffer
+            buffer = self._frame_pool.get()
+
+            # Resize buffer jika perlu
+            if buffer.shape != frame.shape:
+                buffer = np.empty(frame.shape, dtype=np.uint8)
+
+            # Copy frame data ke buffer
+            np.copyto(buffer, frame)
 
             # Create frame data
             frame_data = FrameData(
@@ -251,7 +319,7 @@ class OptimizedPipeline:
                     batch = []
 
     async def _inference_stage(self):
-        """Stage 3: Batched inference"""
+        """Stage 3: Batched inference - FIXED VERSION"""
         while not self._stop_event.is_set():
             try:
                 batch = await asyncio.wait_for(
@@ -261,15 +329,34 @@ class OptimizedPipeline:
 
                 start_time = time.perf_counter()
 
-                # Prepare batch tensor
-                batch_tensor = np.stack([f.preprocessed for f in batch])
+                # Prepare batch input
+                batch_input = [f.preprocessed for f in batch]
 
-                # Run batched inference
-                detections = await asyncio.get_event_loop().run_in_executor(
-                    self._executor,
-                    self.detector.detect_batch,
-                    batch_tensor
-                )
+                # FIXED: Check if detector method is async or sync
+                if hasattr(self.detector, 'detect_batch'):
+                    if asyncio.iscoroutinefunction(self.detector.detect_batch):
+                        # Async method
+                        detections = await self.detector.detect_batch(batch_input)
+                    else:
+                        # Sync method - run in executor
+                        detections = await asyncio.get_event_loop().run_in_executor(
+                            self._executor,
+                            self.detector.detect_batch,
+                            batch_input
+                        )
+                else:
+                    # Fallback: process individually
+                    detections = []
+                    for frame_data in batch:
+                        if asyncio.iscoroutinefunction(self.detector.detect):
+                            det = await self.detector.detect(frame_data.preprocessed)
+                        else:
+                            det = await asyncio.get_event_loop().run_in_executor(
+                                self._executor,
+                                self.detector.detect,
+                                frame_data.preprocessed
+                            )
+                        detections.append(det)
 
                 # Assign detections to frames
                 for frame_data, dets in zip(batch, detections):
@@ -282,9 +369,17 @@ class OptimizedPipeline:
 
             except asyncio.TimeoutError:
                 continue
+            except Exception as e:
+                logger.error(f"Inference stage error: {e}")
+                continue
+
+    def return_frame_buffer(self, frame_data: FrameData):
+        """Return frame buffer to pool after display"""
+        if hasattr(frame_data, 'raw_frame') and frame_data.raw_frame is not None:
+            self._frame_pool.put(frame_data.raw_frame)
 
     async def _tracking_stage(self):
-        """Stage 4: Multi-object tracking and counting"""
+        """Stage 4: Multi-object tracking and counting - FIXED"""
         while not self._stop_event.is_set():
             try:
                 frame_data = await asyncio.wait_for(
@@ -295,19 +390,23 @@ class OptimizedPipeline:
                 start_time = time.perf_counter()
 
                 # Update tracks
-                tracks = self.tracker.update(frame_data.detections)
-                frame_data.tracks = tracks
+                if frame_data.detections is not None:
+                    tracks = self.tracker.update(frame_data.detections)
+                    frame_data.tracks = tracks
 
-                # Update counts
-                if self.counter:
-                    counts = self.counter.update(tracks)
-                    frame_data.metadata['counts'] = counts
+                    # Update counts
+                    if self.counter and tracks:
+                        counts = self.counter.update(tracks)
+                        frame_data.metadata['counts'] = counts
+                else:
+                    frame_data.tracks = []
+                    frame_data.metadata['counts'] = {}
 
                 # Send to output
                 await self._tracking_queue.put(frame_data)
 
-                # Return frame buffer to pool
-                self._frame_pool.put(frame_data.raw_frame)
+                # DON'T return frame buffer here - it will be returned after display
+                # self._frame_pool.put(frame_data.raw_frame)  # REMOVED
 
                 # Record timing
                 elapsed = time.perf_counter() - start_time
@@ -315,36 +414,62 @@ class OptimizedPipeline:
 
             except asyncio.TimeoutError:
                 continue
+            except Exception as e:
+                logger.error(f"Tracking stage error: {e}")
+                continue
 
     def _preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Preprocess frame for inference"""
-        # Letterbox resize
-        h, w = frame.shape[:2]
-        target_size = (640, 640)
+        """Preprocess frame with better memory management"""
+        try:
+            if frame is None or frame.size == 0:
+                logger.warning("Empty frame in preprocessing")
+                return None
 
-        # Calculate scaling
-        scale = min(target_size[0] / h, target_size[1] / w)
-        new_h, new_w = int(h * scale), int(w * scale)
+            # Get dimensions
+            h, w = frame.shape[:2]
+            target_size = (640, 640)
 
-        # Resize
-        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            # Calculate scaling
+            scale = min(target_size[0] / h, target_size[1] / w)
+            new_h, new_w = int(h * scale), int(w * scale)
 
-        # Pad to target size
-        pad_h = (target_size[0] - new_h) // 2
-        pad_w = (target_size[1] - new_w) // 2
+            # Resize with proper interpolation
+            if new_h != h or new_w != w:
+                resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized = frame.copy()
 
-        padded = cv2.copyMakeBorder(
-            resized,
-            pad_h, target_size[0] - new_h - pad_h,
-            pad_w, target_size[1] - new_w - pad_w,
-            cv2.BORDER_CONSTANT,
-            value=(114, 114, 114)
-        )
+            # Pad to target size
+            if new_h != target_size[0] or new_w != target_size[1]:
+                pad_h = (target_size[0] - new_h) // 2
+                pad_w = (target_size[1] - new_w) // 2
 
-        # Convert to tensor format (CHW, normalized)
-        tensor = padded.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+                padded = cv2.copyMakeBorder(
+                    resized,
+                    pad_h, target_size[0] - new_h - pad_h,
+                    pad_w, target_size[1] - new_w - pad_w,
+                    cv2.BORDER_CONSTANT,
+                    value=(114, 114, 114)
+                )
+            else:
+                padded = resized
 
-        return tensor
+            # Convert to tensor format (CHW, normalized)
+            # Use in-place operations to save memory
+            normalized = padded.astype(np.float32, copy=False)
+            normalized /= 255.0
+
+            # Transpose to CHW format
+            tensor = normalized.transpose(2, 0, 1)
+
+            # Add batch dimension
+            batched = tensor[None, ...]
+
+            return batched
+
+        except Exception as e:
+            logger.error(f"Preprocessing error: {e}")
+            return None
 
     def _update_stats(self, frame_data: FrameData):
         """Update pipeline statistics"""

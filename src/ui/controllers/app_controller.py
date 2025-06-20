@@ -188,8 +188,45 @@ class AppController(QObject):
         if self.is_running:
             asyncio.create_task(self._stop_pipeline())
 
+        # Load and display first frame for preview
+        asyncio.create_task(self._load_video_preview())
+
         # Update UI
         self.status_changed.emit("Source selected")
+
+    async def _load_video_preview(self):
+        """Load and display first frame of video for ROI/line setup"""
+        if not self.current_source:
+            return
+
+        try:
+            # Create temporary video capture
+            import cv2
+            if isinstance(self.current_source, int):
+                cap = cv2.VideoCapture(self.current_source)
+            else:
+                cap = cv2.VideoCapture(str(self.current_source))
+
+            if not cap.isOpened():
+                self.error_occurred.emit("Failed to open video source")
+                return
+
+            # Read first frame
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                # Display first frame in video widget
+                if self.video_view and self.video_view.video_widget:
+                    self.video_view.video_widget.display_frame(frame)
+                    logger.info("First frame loaded for preview")
+            else:
+                logger.warning("Could not read first frame")
+
+            # Cleanup
+            cap.release()
+
+        except Exception as e:
+            logger.error(f"Error loading video preview: {e}")
+            self.error_occurred.emit(f"Preview error: {str(e)}")
 
     @Slot(str)
     def _on_model_changed(self, model_name: str):
@@ -205,18 +242,40 @@ class AppController(QObject):
     @Slot()
     def _on_start_requested(self):
         """Handle start request"""
+        logger.info("Start detection requested")
+
+        # Debug current state
+        logger.info(f"Current source: {self.current_source}")
+        logger.info(f"ROI polygon: {self.roi_polygon}")
+        logger.info(f"Counting lines: {len(self.counting_lines)}")
+
         if not self.current_source:
-            self.error_occurred.emit("Please select a video source first")
+            error_msg = "Please select a video source first"
+            logger.error(error_msg)
+            self.error_occurred.emit(error_msg)
             return
 
         if not self.roi_polygon:
-            self.error_occurred.emit("Please define ROI first")
+            error_msg = "Please define ROI first"
+            logger.error(error_msg)
+            self.error_occurred.emit(error_msg)
             return
 
         if not self.counting_lines:
-            self.error_occurred.emit("Please define at least one counting line")
+            error_msg = "Please define at least one counting line"
+            logger.error(error_msg)
+            self.error_occurred.emit(error_msg)
             return
 
+        # Check if models directory exists
+        model_path = self._get_current_model_path()
+        if not Path(model_path).exists():
+            error_msg = f"Model file not found: {model_path}"
+            logger.error(error_msg)
+            self.error_occurred.emit(error_msg)
+            return
+
+        logger.info("All validation passed, starting pipeline...")
         asyncio.create_task(self._start_pipeline())
 
     @Slot()
@@ -290,17 +349,22 @@ class AppController(QObject):
                 await self._update_statistics(frame_data)
 
                 # Display frame
-                if self.video_view:
+                if self.video_view and frame_data.raw_frame is not None:
                     self.video_view.display_frame(frame_data)
+
+                # IMPORTANT: Return frame buffer after display
+                if hasattr(self.pipeline, 'return_frame_buffer'):
+                    self.pipeline.return_frame_buffer(frame_data)
 
             logger.info("Pipeline stopped")
 
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
             self.error_occurred.emit(f"Pipeline error: {str(e)}")
-
         finally:
             self.is_running = False
+            if self.pipeline:
+                await self.pipeline.stop()
             self.status_changed.emit("Pipeline stopped")
 
     async def _stop_pipeline(self):
@@ -630,27 +694,62 @@ class AppController(QObject):
 
     def _get_available_models(self) -> List[str]:
         """Get list of available models"""
-        model_files = []
+        try:
+            model_dir = Path(self.config.model_dir)
+            if not model_dir.exists():
+                logger.warning(f"Model directory not found: {model_dir}")
+                return ["yolov7-tiny"]  # Default fallback
 
-        # Check for model files
-        for ext in ['.xml', '.onnx', '.engine']:
-            model_files.extend(self.config.model_dir.glob(f'*{ext}'))
+            models = []
+            for ext in ['.onnx', '.xml', '.engine', '.pt']:
+                for model_file in model_dir.glob(f"*{ext}"):
+                    model_name = model_file.stem
+                    if model_name not in models:
+                        models.append(model_name)
 
-        return [f.stem for f in model_files]
+            if not models:
+                logger.warning("No models found, using default")
+                return ["yolov7-tiny"]
+
+            logger.info(f"Available models: {models}")
+            return models
+
+        except Exception as e:
+            logger.error(f"Error getting available models: {e}")
+            return ["yolov7-tiny"]
 
     def _get_current_model_path(self) -> str:
         """Get current model path"""
-        if self.video_view:
-            model_name = self.video_view.get_selected_model()
+        try:
+            # Get selected model from video view
+            if self.video_view:
+                model_name = self.video_view.get_selected_model()
+                if model_name:
+                    # Try different model formats
+                    model_dir = Path(self.config.model_dir)
 
-            # Try different extensions
-            for ext in ['.xml', '.onnx', '.engine']:
-                model_path = self.config.model_dir / f"{model_name}{ext}"
-                if model_path.exists():
-                    return str(model_path)
+                    # Check for different extensions
+                    for ext in ['.onnx', '.xml', '.engine', '.pt']:
+                        model_path = model_dir / f"{model_name}{ext}"
+                        if model_path.exists():
+                            logger.info(f"Found model: {model_path}")
+                            return str(model_path)
 
-        # Default model
-        return str(self.config.weights_path)
+                    # If no model found, log available models
+                    if model_dir.exists():
+                        available_models = list(model_dir.glob("*"))
+                        logger.warning(f"Model {model_name} not found. Available models: {available_models}")
+                    else:
+                        logger.error(f"Model directory not found: {model_dir}")
+
+            # Fallback to default model
+            default_model = self.config.model_dir / "yolov7-tiny.onnx"
+            logger.warning(f"Using default model: {default_model}")
+            return str(default_model)
+
+        except Exception as e:
+            logger.error(f"Error getting model path: {e}")
+            return str(self.config.model_dir / "yolov7-tiny.onnx")
 
     def _get_vehicle_type_name(self, class_id: int) -> str:
         """Get vehicle type name from class ID"""
